@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deriv Live Ticks Deep Analyzer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .circle-chart { transform: rotate(-90deg); transform-origin: 50% 50%; }
+    .circle-bg { fill: none; stroke: #1f2937; stroke-width: 3.8; }
+    .circle-progress { fill: none; stroke-width: 3.8; stroke-linecap: round; transition: stroke-dasharray 0.5s ease; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans p-4">
+
+  <div class="max-w-6xl mx-auto space-y-6">
+    <!-- Header -->
+    <header class="flex justify-between items-center bg-slate-900 p-4 rounded-xl border border-slate-800">
+      <div>
+        <h1 class="text-xl font-bold text-blue-400">Deriv Real-Time Tick Analyzer</h1>
+        <p class="text-xs text-slate-400">Direct WebSocket connection to Deriv API</p>
+      </div>
+      <div id="connectionStatus" class="px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+        Disconnected
+      </div>
+    </header>
+
+    <!-- Controls -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 bg-slate-900 p-4 rounded-xl border border-slate-800">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Market Symbol</label>
+        <select id="marketSelect" class="w-full bg-slate-800 text-sm border border-slate-700 rounded p-2 focus:outline-none focus:border-blue-500">
+          <optgroup label="Plain Synthetic Indices">
+            <option value="R_10">Volatility 10 Index</option>
+            <option value="R_15">Volatility 15 Index</option>
+            <option value="R_25">Volatility 25 Index</option>
+            <option value="R_50" selected>Volatility 50 Index</option>
+            <option value="R_75">Volatility 75 Index</option>
+            <option value="R_100">Volatility 100 Index</option>
+          </optgroup>
+          <optgroup label="1s Synthetic Indices">
+            <option value="1HZ10V">Volatility 10 (1s) Index</option>
+            <option value="1HZ15V">Volatility 15 (1s) Index</option>
+            <option value="1HZ25V">Volatility 25 (1s) Index</option>
+            <option value="1HZ50V">Volatility 50 (1s) Index</option>
+            <option value="1HZ75V">Volatility 75 (1s) Index</option>
+            <option value="1HZ100V">Volatility 100 (1s) Index</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Tick History Depth (0-100)</label>
+        <input type="number" id="tickDepth" min="10" max="100" value="50" class="w-full bg-slate-800 text-sm border border-slate-700 rounded p-2 focus:outline-none focus:border-blue-500">
+      </div>
+
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Prediction Digit (Matches/Differs)</label>
+        <input type="number" id="targetDigit" min="0" max="9" value="5" class="w-full bg-slate-800 text-sm border border-slate-700 rounded p-2 focus:outline-none focus:border-blue-500">
+      </div>
+
+      <div class="flex items-end gap-2">
+        <button id="startBtn" onclick="connectDeriv()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold py-2 rounded transition">
+          Connect & Analyze
+        </button>
+        <button id="stopBtn" onclick="disconnectDeriv()" class="w-full bg-rose-600 hover:bg-rose-500 text-white text-sm font-semibold py-2 rounded transition">
+          Disconnect
+        </button>
+      </div>
+    </div>
+
+    <!-- Live Ticker Banner -->
+    <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 flex justify-between items-center">
+      <div>
+        <span class="text-xs text-slate-400">Current Quote</span>
+        <div id="currentPrice" class="text-2xl font-mono font-bold text-white">0.0000</div>
+      </div>
+      <div>
+        <span class="text-xs text-slate-400">Last Digit</span>
+        <div id="lastDigit" class="text-3xl font-mono font-bold text-blue-400 text-right">-</div>
+      </div>
+      <div>
+        <span class="text-xs text-slate-400">Directional Signal</span>
+        <div id="tradeSignal" class="text-sm font-bold px-3 py-1 rounded bg-slate-800 text-slate-300">
+          WAITING FOR DATA
+        </div>
+      </div>
+    </div>
+
+    <!-- Probability Indicators -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      
+      <!-- Up / Down Probability -->
+      <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 text-center">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">Direction Analysis (Rise / Fall)</h2>
+        <div class="flex justify-around items-center">
+          <!-- Rise Circle -->
+          <div class="flex flex-col items-center">
+            <svg class="w-24 h-24 circle-chart" viewBox="0 0 36 36">
+              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path id="riseCircle" class="circle-progress stroke-emerald-500" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="riseVal" class="text-lg font-bold text-emerald-400 mt-2">0%</span>
+            <span class="text-xs text-slate-400">RISE (UP)</span>
+          </div>
+
+          <!-- Fall Circle -->
+          <div class="flex flex-col items-center">
+            <svg class="w-24 h-24 circle-chart" viewBox="0 0 36 36">
+              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path id="fallCircle" class="circle-progress stroke-rose-500" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="fallVal" class="text-lg font-bold text-rose-400 mt-2">0%</span>
+            <span class="text-xs text-slate-400">FALL (DOWN)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Match / Differ Probability -->
+      <div class="bg-slate-900 p-6 rounded-xl border border-slate-800 text-center">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">Digit Analysis (Matches / Differs)</h2>
+        <div class="flex justify-around items-center">
+          <!-- Match Circle -->
+          <div class="flex flex-col items-center">
+            <svg class="w-24 h-24 circle-chart" viewBox="0 0 36 36">
+              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path id="matchCircle" class="circle-progress stroke-blue-500" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="matchVal" class="text-lg font-bold text-blue-400 mt-2">0%</span>
+            <span class="text-xs text-slate-400">MATCHES</span>
+          </div>
+
+          <!-- Differ Circle -->
+          <div class="flex flex-col items-center">
+            <svg class="w-24 h-24 circle-chart" viewBox="0 0 36 36">
+              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path id="differCircle" class="circle-progress stroke-amber-500" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="differVal" class="text-lg font-bold text-amber-400 mt-2">0%</span>
+            <span class="text-xs text-slate-400">DIFFERS</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Live Tick Stream Log -->
+    <div class="bg-slate-900 p-4 rounded-xl border border-slate-800">
+      <h2 class="text-xs font-semibold text-slate-400 mb-2">Live Tick Stream</h2>
+      <div id="tickStreamLog" class="h-32 overflow-y-auto font-mono text-xs space-y-1 bg-slate-950 p-2 rounded border border-slate-800">
+        <div class="text-slate-500">Press "Connect & Analyze" to start receiving real market data from Deriv...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let ticksHistory = [];
+    let currentSubscriptionId = null;
+
+    function connectDeriv() {
+      disconnectDeriv();
+
+      const symbol = document.getElementById('marketSelect').value;
+      const statusEl = document.getElementById('connectionStatus');
+      
+      statusEl.innerText = "Connecting...";
+      statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20";
+
+      // Direct WebSocket to Deriv Public API (app_id=1089)
+      ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
+
+      ws.onopen = () => {
+        statusEl.innerText = "Connected (Live Deriv)";
+        statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+        logStream(`Connected to Deriv WebSocket API. Subscribing to ${symbol}...`);
+
+        // Request Historical Ticks + Subscribe
+        const depth = parseInt(document.getElementById('tickDepth').value) || 50;
+        ws.send(JSON.stringify({
+          ticks_history: symbol,
+          adjust_start_time: 1,
+          count: depth,
+          end: "latest",
+          style: "ticks",
+          subscribe: 1
+        }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        // Handle History Response
+        if (data.msg_type === 'history') {
+          ticksHistory = data.history.prices;
+          if (data.subscription) currentSubscriptionId = data.subscription.id;
+          updateAnalysis();
+        }
+
+        // Handle Live Tick Updates
+        if (data.msg_type === 'tick') {
+          const tick = data.tick;
+          ticksHistory.push(tick.quote);
+          const maxDepth = parseInt(document.getElementById('tickDepth').value) || 50;
+          if (ticksHistory.length > maxDepth) ticksHistory.shift();
+
+          const pipSize = tick.pip_size || 4;
+          const formattedQuote = tick.quote.toFixed(pipSize);
+          const lastDigit = parseInt(formattedQuote.slice(-1));
+
+          document.getElementById('currentPrice').innerText = formattedQuote;
+          document.getElementById('lastDigit').innerText = lastDigit;
+
+          logStream(`[${new Date(tick.epoch * 1000).toLocaleTimeString()}] ${tick.symbol}: ${formattedQuote} (Digit: ${lastDigit})`);
+
+          updateAnalysis();
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("Deriv WS Error:", err);
+        statusEl.innerText = "Connection Error";
+        statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20";
+      };
+
+      ws.onclose = () => {
+        statusEl.innerText = "Disconnected";
+        statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
+      };
+    }
+
+    function disconnectDeriv() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      ticksHistory = [];
+    }
+
+    function updateAnalysis() {
+      if (ticksHistory.length < 2) return;
+
+      // 1. Rise / Fall Analysis
+      let rises = 0;
+      let falls = 0;
+      for (let i = 1; i < ticksHistory.length; i++) {
+        if (ticksHistory[i] > ticksHistory[i - 1]) rises++;
+        else if (ticksHistory[i] < ticksHistory[i - 1]) falls++;
+      }
+      const totalChanges = rises + falls || 1;
+      const risePct = Math.round((rises / totalChanges) * 100);
+      const fallPct = 100 - risePct;
+
+      document.getElementById('riseVal').innerText = `${risePct}%`;
+      document.getElementById('fallVal').innerText = `${fallPct}%`;
+      document.getElementById('riseCircle').setAttribute('stroke-dasharray', `${risePct}, 100`);
+      document.getElementById('fallCircle').setAttribute('stroke-dasharray', `${fallPct}, 100`);
+
+      // Signal Recommendation
+      const signalEl = document.getElementById('tradeSignal');
+      if (risePct >= 65) {
+        signalEl.innerText = "SIGNAL: STRONG RISE (UP)";
+        signalEl.className = "text-sm font-bold px-3 py-1 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+      } else if (fallPct >= 65) {
+        signalEl.innerText = "SIGNAL: STRONG FALL (DOWN)";
+        signalEl.className = "text-sm font-bold px-3 py-1 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30";
+      } else {
+        signalEl.innerText = "SIGNAL: NEUTRAL / WAIT";
+        signalEl.className = "text-sm font-bold px-3 py-1 rounded bg-slate-800 text-slate-400";
+      }
+
+      // 2. Matches / Differs Analysis
+      const targetDigit = parseInt(document.getElementById('targetDigit').value) || 0;
+      let matches = 0;
+      ticksHistory.forEach(price => {
+        const digit = parseInt(price.toFixed(4).slice(-1));
+        if (digit === targetDigit) matches++;
+      });
+
+      const matchPct = Math.round((matches / ticksHistory.length) * 100);
+      const differPct = 100 - matchPct;
+
+      document.getElementById('matchVal').innerText = `${matchPct}%`;
+      document.getElementById('differVal').innerText = `${differPct}%`;
+      document.getElementById('matchCircle').setAttribute('stroke-dasharray', `${matchPct}, 100`);
+      document.getElementById('differCircle').setAttribute('stroke-dasharray', `${differPct}, 100`);
+    }
+
+    function logStream(msg) {
+      const container = document.getElementById('tickStreamLog');
+      const item = document.createElement('div');
+      item.innerText = msg;
+      container.appendChild(item);
+      container.scrollTop = container.scrollHeight;
+    }
+  </script>
+</body>
+  </html>
+  
