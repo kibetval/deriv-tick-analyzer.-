@@ -157,74 +157,101 @@
     let ticksHistory = [];
     let isRunning = false;
     let fallbackTimer = null;
+    let currentSymbol = null;
 
     function startBot() {
       stopBot();
       isRunning = true;
 
-      const symbol = document.getElementById('marketSelect').value;
+      currentSymbol = document.getElementById('marketSelect').value;
       const statusEl = document.getElementById('connectionStatus');
       
       statusEl.innerText = "Connecting...";
       statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20";
 
-      // Use binaryws.com primary production domain which has higher reliability in web browsers
-      ws = new WebSocket('wss://ws.binaryws.com/websockets/v3?app_id=1089');
+      // Try primary Deriv websocket endpoint
+      const endpoints = [
+        'wss://ws.binaryws.com/websockets/v3?app_id=1089',
+        'wss://ws.derivws.com/websockets/v3?app_id=1089'
+      ];
+
+      // Attempt first endpoint; on failure we'll attempt the fallback endpoint
+      tryConnect(endpoints, 0);
+    }
+
+    function tryConnect(endpoints, idx) {
+      if (idx >= endpoints.length) {
+        const statusEl = document.getElementById('connectionStatus');
+        statusEl.innerText = "Connection Failed - Using Live Simulation";
+        statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20";
+        startFallbackSimulator(currentSymbol);
+        return;
+      }
+
+      const url = endpoints[idx];
+      ws = new WebSocket(url);
 
       ws.onopen = () => {
+        const statusEl = document.getElementById('connectionStatus');
         statusEl.innerText = "Connected (Live)";
         statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-        logStream(`Connected to Deriv. Requesting history for ${symbol}...`);
+        logStream(`Connected to Deriv via ${url}. Requesting history and subscribing to ${currentSymbol}...`);
 
         const depth = parseInt(document.getElementById('tickDepth').value) || 50;
-        ws.send(JSON.stringify({
-          ticks_history: symbol,
-          adjust_start_time: 1,
-          count: depth,
-          end: "latest",
-          style: "ticks",
-          subscribe: 1
-        }));
+        // Request history (no subscribe) then request a live ticks subscription
+        ws.send(JSON.stringify({ ticks_history: currentSymbol, adjust_start_time: 1, count: depth, end: "latest", style: "ticks" }));
+        ws.send(JSON.stringify({ ticks: currentSymbol, subscribe: 1 }));
       };
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+        let data = null;
+        try { data = JSON.parse(event.data); } catch (e) { return; }
 
-        if (data.msg_type === 'history') {
-          ticksHistory = data.history.prices;
+        if (data.msg_type === 'history' && data.history && Array.isArray(data.history.prices)) {
+          // Convert history prices to numbers
+          ticksHistory = data.history.prices.map(p => parseFloat(p)).filter(n => !Number.isNaN(n));
           updateAnalysis();
         }
 
-        if (data.msg_type === 'tick') {
+        if (data.msg_type === 'tick' && data.tick) {
           const tick = data.tick;
-          ticksHistory.push(tick.quote);
-          const maxDepth = parseInt(document.getElementById('tickDepth').value) || 50;
-          if (ticksHistory.length > maxDepth) ticksHistory.shift();
+          const quoteNum = parseFloat(tick.quote);
+          if (!Number.isNaN(quoteNum)) {
+            ticksHistory.push(quoteNum);
+            const maxDepth = parseInt(document.getElementById('tickDepth').value) || 50;
+            if (ticksHistory.length > maxDepth) ticksHistory.shift();
 
-          processNewTick(tick.quote, tick.symbol);
+            processNewTick(quoteNum, tick.symbol || currentSymbol, tick.pip_size);
+          }
+        }
+
+        // handle error responses from Deriv (e.g., invalid App ID / permission)
+        if (data.error) {
+          logStream(`API Error: ${data.error.message || JSON.stringify(data.error)}`);
         }
       };
 
       ws.onerror = (err) => {
-        console.error("WS Error:", err);
-        statusEl.innerText = "Connection Blocked - Using Live Simulation";
-        statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20";
-        startFallbackSimulator(symbol);
+        console.error('WS error on', url, err);
+        // try next endpoint
+        try { ws.close(); } catch (e) {}
+        tryConnect(endpoints, idx + 1);
       };
 
-      ws.onclose = () => {
-        if (isRunning && statusEl.innerText.includes("Connecting")) {
-          statusEl.innerText = "Fallback Active";
-          startFallbackSimulator(symbol);
+      ws.onclose = (ev) => {
+        // only start fallback if user didn't intentionally stop
+        if (isRunning) {
+          const statusEl = document.getElementById('connectionStatus');
+          statusEl.innerText = "Disconnected - Fallback";
+          statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
+          startFallbackSimulator(currentSymbol);
         }
       };
     }
 
     function startFallbackSimulator(symbol) {
       if (fallbackTimer) clearInterval(fallbackTimer);
-      // Fallback guarantees that if network blocks the WebSocket, the bot still functions smoothly with live-pegged synthetic pricing
-      let basePrice = symbol.includes("100") ? 1000 : (symbol.includes("75") ? 5000 : 100);
-      
+      let basePrice = (symbol && symbol.includes("100")) ? 1000 : ((symbol && symbol.includes("75")) ? 5000 : 100);
       fallbackTimer = setInterval(() => {
         if (!isRunning) return;
         const change = (Math.random() - 0.49) * (basePrice * 0.001);
@@ -236,28 +263,30 @@
       }, 1000);
     }
 
-    function processNewTick(quote, symbol) {
-      const pipSize = symbol.includes("1HZ") ? 2 : 4;
-      const formattedQuote = quote.toFixed(pipSize);
-      const lastDigit = parseInt(formattedQuote.slice(-1));
+    function processNewTick(quote, symbol, pipSizeFromTick) {
+      const pipSize = (typeof pipSizeFromTick === 'number') ? pipSizeFromTick : ((symbol && symbol.includes("1HZ")) ? 2 : 4);
+      const formattedQuote = Number(quote).toFixed(pipSize);
+      const digitsOnly = formattedQuote.replace(/[^0-9]/g, '');
+      const lastDigit = parseInt(digitsOnly.slice(-1), 10);
 
       document.getElementById('currentPrice').innerText = formattedQuote;
-      document.getElementById('lastDigit').innerText = lastDigit;
+      document.getElementById('lastDigit').innerText = isNaN(lastDigit) ? '-' : lastDigit;
 
-      logStream(`[${new Date().toLocaleTimeString()}] ${symbol}: ${formattedQuote} | Digit: ${lastDigit}`);
+      logStream(`[${new Date().toLocaleTimeString()}] ${symbol}: ${formattedQuote} | Digit: ${isNaN(lastDigit) ? '-' : lastDigit}`);
       updateAnalysis();
     }
 
     function stopBot() {
       isRunning = false;
       if (ws) {
-        ws.close();
+        try { ws.close(); } catch (e) {}
         ws = null;
       }
       if (fallbackTimer) {
         clearInterval(fallbackTimer);
         fallbackTimer = null;
       }
+      ticksHistory = [];
       const statusEl = document.getElementById('connectionStatus');
       statusEl.innerText = "Disconnected";
       statusEl.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
@@ -266,12 +295,15 @@
     function updateAnalysis() {
       if (ticksHistory.length < 2) return;
 
+      const historyNums = ticksHistory.map(v => Number(v)).filter(v => !Number.isNaN(v));
+      if (historyNums.length < 2) return;
+
       // 1. Rise / Fall Calculation
       let rises = 0;
       let falls = 0;
-      for (let i = 1; i < ticksHistory.length; i++) {
-        if (ticksHistory[i] > ticksHistory[i - 1]) rises++;
-        else if (ticksHistory[i] < ticksHistory[i - 1]) falls++;
+      for (let i = 1; i < historyNums.length; i++) {
+        if (historyNums[i] > historyNums[i - 1]) rises++;
+        else if (historyNums[i] < historyNums[i - 1]) falls++;
       }
       const totalChanges = rises + falls || 1;
       const risePct = Math.round((rises / totalChanges) * 100);
@@ -283,17 +315,18 @@
       document.getElementById('fallCircle').setAttribute('stroke-dasharray', `${fallPct}, 100`);
 
       // 2. Digit Match / Differ Calculation
-      const targetDigit = parseInt(document.getElementById('targetDigit').value) || 0;
+      const targetDigit = parseInt(document.getElementById('targetDigit').value, 10) || 0;
       document.getElementById('targetDisplay').innerText = targetDigit;
       document.getElementById('targetDisplay2').innerText = targetDigit;
 
+      const digitsFixed = (currentSymbol && currentSymbol.includes("1HZ")) ? 2 : 4;
       let matches = 0;
-      ticksHistory.forEach(price => {
-        const digit = parseInt(price.toFixed(4).slice(-1));
+      historyNums.forEach(price => {
+        const digit = parseInt(Number(price).toFixed(digitsFixed).replace(/[^0-9]/g, '').slice(-1), 10);
         if (digit === targetDigit) matches++;
       });
 
-      const matchPct = Math.round((matches / ticksHistory.length) * 100);
+      const matchPct = Math.round((matches / historyNums.length) * 100);
       const differPct = 100 - matchPct;
 
       document.getElementById('matchVal').innerText = `${matchPct}%`;
